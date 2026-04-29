@@ -166,14 +166,21 @@ feishu-cli doc content-update <document_id> --mode append \
 #### 场景 D：删除指定章节
 
 ```bash
-# 按标题定位并删除整个章节
+# 按标题定位并删除整个章节（包括标题）
 feishu-cli doc content-update <document_id> --mode delete_range \
   --selection-by-title "## 废弃章节"
+
+# 删除章节内容但保留标题（保留飞书自动序号等格式属性）
+feishu-cli doc content-update <document_id> --mode delete_range \
+  --selection-by-title "## 章节" --keep-title
 
 # 按内容范围定位并删除
 feishu-cli doc content-update <document_id> --mode delete_range \
   --selection-with-ellipsis "开始段落...结束段落"
 ```
+
+> **`--keep-title` 参数**：与 `delete_range` 或 `replace_range` 配合使用，删除/替换时保留标题块。
+> 适用于保留飞书自动序号（如 1.1、1.2）等格式属性的场景。
 
 #### 场景 E：全文查找替换
 
@@ -499,6 +506,7 @@ feishu-cli doc media-insert <document_id> \
 | `--markdown` | 直接传入 Markdown 内容（支持 `\n` 转义为换行） |
 | `--markdown-file` | 从文件读取 Markdown 内容 |
 | `--upload-images` | 上传 Markdown 中的本地图片 |
+| `--keep-title` | 与 `delete_range`/`replace_range` 配合，删除/替换时保留标题块（保留飞书自动序号等格式属性） |
 | `-o json` | JSON 格式输出 |
 
 > `--markdown` 和 `--markdown-file` 不能同时使用。

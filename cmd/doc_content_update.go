@@ -29,6 +29,9 @@ var docContentUpdateCmd = &cobra.Command{
   --selection-by-title "## 标题"        按标题定位
   --selection-with-ellipsis "开头...结尾" 按内容范围定位
 
+保留标题:
+  --keep-title 与 delete_range/replace_range 配合使用，删除时保留标题块（保留飞书自动序号等格式属性）
+
 示例:
   # 追加内容
   feishu-cli doc content-update DOC_ID --mode append --markdown "## 新章节\n\n内容"
@@ -52,6 +55,14 @@ var docContentUpdateCmd = &cobra.Command{
   feishu-cli doc content-update DOC_ID --mode delete_range \
     --selection-by-title "## 废弃章节"
 
+  # 删除章节内容但保留标题（保留飞书自动序号）
+  feishu-cli doc content-update DOC_ID --mode delete_range \
+    --selection-by-title "## 章节" --keep-title
+
+  # 替换章节内容但保留标题格式
+  feishu-cli doc content-update DOC_ID --mode replace_range \
+    --selection-by-title "## 章节" --keep-title --markdown "新内容"
+
   # 从文件读取 markdown
   feishu-cli doc content-update DOC_ID --mode append --markdown-file content.md`,
 	Args: cobra.ExactArgs(1),
@@ -68,6 +79,7 @@ func init() {
 	docContentUpdateCmd.Flags().StringP("output", "o", "", "输出格式 (json)")
 	docContentUpdateCmd.Flags().String("user-access-token", "", "User Access Token")
 	docContentUpdateCmd.Flags().Bool("upload-images", false, "上传 Markdown 中的本地图片")
+	docContentUpdateCmd.Flags().Bool("keep-title", false, "删除/替换时保留标题块（保留飞书自动序号等格式属性）")
 	mustMarkFlagRequired(docContentUpdateCmd, "mode")
 }
 
@@ -85,6 +97,7 @@ func runDocContentUpdate(cmd *cobra.Command, args []string) error {
 	selWithEllipsis, _ := cmd.Flags().GetString("selection-with-ellipsis")
 	output, _ := cmd.Flags().GetString("output")
 	uploadImages, _ := cmd.Flags().GetBool("upload-images")
+	keepTitle, _ := cmd.Flags().GetBool("keep-title")
 	userAccessToken := resolveOptionalUserToken(cmd)
 
 	// 解析 Markdown 内容
@@ -104,7 +117,7 @@ func runDocContentUpdate(cmd *cobra.Command, args []string) error {
 	case "overwrite":
 		return doOverwrite(documentID, markdownContent, uploadImages, output, userAccessToken)
 	case "replace_range":
-		return doReplaceRange(documentID, markdownContent, selByTitle, selWithEllipsis, uploadImages, output, userAccessToken)
+		return doReplaceRange(documentID, markdownContent, selByTitle, selWithEllipsis, uploadImages, keepTitle, output, userAccessToken)
 	case "replace_all":
 		return doReplaceAll(documentID, markdownContent, selByTitle, selWithEllipsis, uploadImages, output, userAccessToken)
 	case "insert_before":
@@ -112,7 +125,7 @@ func runDocContentUpdate(cmd *cobra.Command, args []string) error {
 	case "insert_after":
 		return doInsertAfter(documentID, markdownContent, selByTitle, selWithEllipsis, uploadImages, output, userAccessToken)
 	case "delete_range":
-		return doDeleteRange(documentID, selByTitle, selWithEllipsis, output, userAccessToken)
+		return doDeleteRange(documentID, selByTitle, selWithEllipsis, keepTitle, output, userAccessToken)
 	}
 	return nil // validateContentUpdateParams 已确保 mode 合法
 }
@@ -425,7 +438,7 @@ func doOverwrite(documentID, markdown string, uploadImages bool, output, userAcc
 }
 
 // doReplaceRange 按定位替换一段内容
-func doReplaceRange(documentID, markdown, selByTitle, selWithEllipsis string, uploadImages bool, output, userAccessToken string) error {
+func doReplaceRange(documentID, markdown, selByTitle, selWithEllipsis string, uploadImages bool, keepTitle bool, output, userAccessToken string) error {
 	children, err := getPageChildren(documentID, userAccessToken)
 	if err != nil {
 		return fmt.Errorf("获取文档内容失败: %w", err)
@@ -439,18 +452,33 @@ func doReplaceRange(documentID, markdown, selByTitle, selWithEllipsis string, up
 	// 取第一个匹配范围
 	r := ranges[0]
 
-	// 先删除匹配范围
-	if _, err := client.DeleteBlocks(documentID, documentID, r.startIndex, r.endIndex, userAccessToken); err != nil {
-		return fmt.Errorf("删除目标内容失败: %w", err)
+	// 计算删除范围
+	deleteStart := r.startIndex
+	deleteEnd := r.endIndex
+	if keepTitle && selByTitle != "" {
+		// 保留标题块，只删除标题后面的内容
+		deleteStart = r.startIndex + 1
+	}
+
+	// 检查是否有内容需要删除
+	if deleteStart < deleteEnd {
+		if _, err := client.DeleteBlocks(documentID, documentID, deleteStart, deleteEnd, userAccessToken); err != nil {
+			return fmt.Errorf("删除目标内容失败: %w", err)
+		}
 	}
 
 	// 在删除位置插入新内容
-	err = addContentMarkdown(documentID, documentID, markdown, "", uploadImages, r.startIndex, output, userAccessToken)
+	insertIndex := deleteStart
+	err = addContentMarkdown(documentID, documentID, markdown, "", uploadImages, insertIndex, output, userAccessToken)
 	if err != nil {
 		return fmt.Errorf("插入替换内容失败: %w", err)
 	}
 	if output != "json" {
-		fmt.Printf("已替换索引 %d 到 %d 的内容\n", r.startIndex, r.endIndex)
+		if keepTitle && selByTitle != "" {
+			fmt.Printf("已替换标题后的内容（保留标题），插入位置索引 %d\n", insertIndex)
+		} else {
+			fmt.Printf("已替换索引 %d 到 %d 的内容\n", r.startIndex, r.endIndex)
+		}
 	}
 	return nil
 }
@@ -544,7 +572,7 @@ func doInsertAfter(documentID, markdown, selByTitle, selWithEllipsis string, upl
 }
 
 // doDeleteRange 删除定位的内容
-func doDeleteRange(documentID, selByTitle, selWithEllipsis string, output, userAccessToken string) error {
+func doDeleteRange(documentID, selByTitle, selWithEllipsis string, keepTitle bool, output, userAccessToken string) error {
 	children, err := getPageChildren(documentID, userAccessToken)
 	if err != nil {
 		return fmt.Errorf("获取文档内容失败: %w", err)
@@ -559,10 +587,20 @@ func doDeleteRange(documentID, selByTitle, selWithEllipsis string, output, userA
 	deleted := 0
 	for i := len(ranges) - 1; i >= 0; i-- {
 		r := ranges[i]
-		if _, err := client.DeleteBlocks(documentID, documentID, r.startIndex, r.endIndex, userAccessToken); err != nil {
-			return fmt.Errorf("删除第 %d 个匹配内容失败: %w", i+1, err)
+		// 计算删除范围
+		deleteStart := r.startIndex
+		deleteEnd := r.endIndex
+		if keepTitle && selByTitle != "" {
+			// 保留标题块，只删除标题后面的内容
+			deleteStart = r.startIndex + 1
 		}
-		deleted += r.endIndex - r.startIndex
+		// 检查是否有内容需要删除
+		if deleteStart < deleteEnd {
+			if _, err := client.DeleteBlocks(documentID, documentID, deleteStart, deleteEnd, userAccessToken); err != nil {
+				return fmt.Errorf("删除第 %d 个匹配内容失败: %w", i+1, err)
+			}
+			deleted += deleteEnd - deleteStart
+		}
 	}
 
 	if output == "json" {
@@ -570,8 +608,13 @@ func doDeleteRange(documentID, selByTitle, selWithEllipsis string, output, userA
 			"document_id":    documentID,
 			"deleted_blocks": deleted,
 			"deleted_ranges": len(ranges),
+			"keep_title":     keepTitle,
 		})
 	}
-	fmt.Printf("已删除 %d 个块（%d 个匹配范围）\n", deleted, len(ranges))
+	if keepTitle && selByTitle != "" {
+		fmt.Printf("已删除 %d 个块（保留标题）\n", deleted)
+	} else {
+		fmt.Printf("已删除 %d 个块（%d 个匹配范围）\n", deleted, len(ranges))
+	}
 	return nil
 }
